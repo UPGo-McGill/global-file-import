@@ -7,12 +7,15 @@
 ################################################################################
 #### 1. LOAD LIBRARIES AND FILES AND PREPARE DATES #############################
 
+### Load libraries #############################################################
+
 library(tidyverse)
 library(strr)
 library(upgo)
 library(RPostgres)
 
-load("temp_3.Rdata")
+
+### Declare date variables #####################################################
 
 # Detect year_month from current date
 year_month <- 
@@ -28,7 +31,7 @@ year_month <-
   )}
 
 # Manually specify year_month if needed
-#year_month <- "2019_11"
+# year_month <- "2019_11"
 
 # Derive last_month using same pattern matching
 last_month <- 
@@ -42,6 +45,11 @@ last_month <-
                                      as.numeric(substr(., 6, 7)) - 1),
     TRUE ~ paste0(substr(., 1, 6), as.numeric(substr(., 7, 7)) - 1)
   )}
+
+
+### Load property file #########################################################
+
+load(paste0("output/property/property_", year_month, ".Rdata"))
 
 
 ################################################################################
@@ -161,7 +169,7 @@ Sys.time()
 
 
 ################################################################################
-#### 16. PREPARE DAILY FILE 1 ##################################################
+#### 3. PREPARE DAILY FILE 1 ###################################################
 
 ### Import daily file ##########################################################
 
@@ -198,7 +206,7 @@ output_1 <- strr_compress(daily, cores = 5)
 
 daily <- 
   output_1[[1]] %>% 
-  left_join(select(property, property_ID, host_ID, listing_type:housing,
+  inner_join(select(property, property_ID, host_ID, listing_type:housing,
                    country:city),
             by = "property_ID")
 
@@ -230,7 +238,7 @@ rm(output_1)
 
 
 ################################################################################
-#### 17. PREPARE DAILY FILE 2 ##################################################
+#### 4. PREPARE DAILY FILE 2 ###################################################
 
 ### Import daily file ##########################################################
 
@@ -268,7 +276,7 @@ output_2 <- strr_compress(daily, cores = 5)
 
 daily <- 
   output_2[[1]] %>% 
-  left_join(select(property, property_ID, host_ID, listing_type:housing,
+  inner_join(select(property, property_ID, host_ID, listing_type:housing,
                    country:city),
             by = "property_ID")
 
@@ -300,7 +308,7 @@ rm(output_2)
 
 
 ################################################################################
-#### 18. PREPARE DAILY FILE 3 ##################################################
+#### 5. PREPARE DAILY FILE 3 ###################################################
 
 ### Import daily file ##########################################################
 
@@ -337,7 +345,7 @@ output_3 <- strr_compress(daily, cores = 4)
 
 daily <- 
   output_3[[1]] %>% 
-  left_join(select(property, property_ID, host_ID, listing_type:housing,
+  inner_join(select(property, property_ID, host_ID, listing_type:housing,
                    country:city),
             by = "property_ID")
 
@@ -359,18 +367,18 @@ no_property_ID <-
 save(no_property_ID, file = paste0("output/", substr(year_month, 1, 4), 
                                    "/no_PID_", year_month, ".Rdata"))
 
-file.remove("temp_no_PID.Rdata")
+file.remove("temp_no_PID.Rdata", "data/daily_length.Rdata")
 
-rm(output_3, no_property_ID, daily)
-
-
-################################################################################
-################################################################################
-
+rm(output_3, no_property_ID, daily, daily_length)
 
 
 ################################################################################
-#### 19. UPLOAD DAILY FILES ####################################################
+################################################################################
+
+
+
+################################################################################
+#### 6. UPLOAD DAILY FILES #####################################################
 
 ### Upload file 1 ##############################################################
 
@@ -431,7 +439,7 @@ daily_all %>%
   collect() %>% 
   nrow()
 
-rm(con, daily_all)
+upgo_disconnect()
 
 
 ################################################################################
@@ -440,7 +448,7 @@ rm(con, daily_all)
 
 
 ################################################################################
-#### 20. PREPARE AND UPLOAD ML TABLE ###########################################
+#### 7. PREPARE AND UPLOAD ML TABLE ############################################
 
 ### Load files #################################################################
 

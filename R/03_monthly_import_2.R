@@ -11,6 +11,9 @@ library(tidyverse)
 library(sf)
 library(strr)
 library(upgo)
+library(future)
+
+plan(multiprocess)
 
 load("temp_3.Rdata")
 
@@ -97,16 +100,13 @@ pair_list <-
 
 country_matches_1 <-
   pair_list %>% 
-  pbapply::pblapply(function(x) {
-    x[[1]] %>% 
+  furrr::future_map_dfr(~{
+    .x[[1]] %>% 
       strr_as_sf(3857) %>% 
-      st_intersection(x[[2]])}, cl = 6) %>% 
-  map(~{
-    .x %>% 
+      st_intersection(.x[[2]]) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city)
-  }) %>% 
-  bind_rows() %>% 
+      }) %>% 
   distinct(property_ID, .keep_all = TRUE)
 
 no_matches <- 
@@ -116,7 +116,7 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-save(country_matches_1, no_matches, file = "temp_4.Rdata")
+future(save(country_matches_1, no_matches, file = "temp_4.Rdata"))
 rm(countries_active, country_list, pair_list)
 
 
@@ -138,17 +138,13 @@ no_matches_list <-
 
 country_matches_2 <- 
   no_matches_list %>% 
-  pbapply::pblapply(function(x) {
-    x %>% 
-      strr_as_sf(3857) %>% 
-      st_intersection(countries_sub)
-  }, cl = 6) %>% 
-  map(~{
+  furrr::future_map_dfr(~{
     .x %>% 
+      strr_as_sf(3857) %>% 
+      st_intersection(countries_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  }) %>% 
-  bind_rows()
+    })
 
 no_matches <- 
   no_matches %>% 
@@ -157,7 +153,7 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-save(country_matches_2, no_matches, file = "temp_5.Rdata")
+future(save(country_matches_2, no_matches, file = "temp_5.Rdata"))
 
 
 ### Third try, against GADM 5 km borders #######################################
@@ -170,17 +166,13 @@ no_matches_list <-
 
 country_matches_3 <- 
   no_matches_list %>% 
-  pbapply::pblapply(function(x) {
-    x %>% 
-      strr_as_sf(3857) %>% 
-      st_intersection(country_buffer_sub)
-  }, cl = 6) %>% 
-  map(~{
+  furrr::future_map_dfr(~{
     .x %>% 
+      strr_as_sf(3857) %>% 
+      st_intersection(country_buffer_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  }) %>% 
-  bind_rows()
+  })
 
 
 ## Decide ties based on closest distance
@@ -195,7 +187,7 @@ ties_list <-
     ties %>% 
       summarize(candidates = list(name)) %>% 
       split(1:100) %>% 
-      pbapply::pblapply(function(x) {
+      furrr::future_map(function(x) {
         x %>% 
           mutate(winner = map2_chr(property_ID, candidates, ~{
             index <- 
@@ -204,7 +196,7 @@ ties_list <-
               strr_as_sf(3857) %>% 
               st_nearest_feature(countries %>% filter(name %in% unlist(.y)))
             (countries %>% filter(name %in% unlist(.y)))[index,]$name
-            }))}, cl = 6)
+            }))})
     )
 
 country_matches_3 <- 
@@ -227,7 +219,7 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-save(country_matches_3, no_matches, ties, file = "temp_6.Rdata")
+future(save(country_matches_3, no_matches, ties, file = "temp_6.Rdata"))
 
 rm(ties_list, no_matches_list)
 
@@ -242,16 +234,13 @@ no_matches_list <-
   
 country_matches_4 <- 
   no_matches_list %>% 
-  pbapply::pblapply(function(x) {
-    x %>% 
-      strr_as_sf(3857) %>% 
-      st_intersection(countries_2_sub)
-  }, cl = 6) %>% 
-  map(~{
+  furrr::future_map_dfr(~{
     .x %>% 
+      strr_as_sf(3857) %>% 
+      st_intersection(countries_2_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  }) %>% bind_rows()
+  })
 
 no_matches <- 
   no_matches %>% 
@@ -260,7 +249,7 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-save(country_matches_4, no_matches, file = "temp_7.Rdata")
+future(save(country_matches_4, no_matches, file = "temp_7.Rdata"))
 
 
 ### Final try, with 5 km buffers around rnaturalearth boundary files ###########
@@ -273,16 +262,13 @@ no_matches_list <-
   
 country_matches_5 <- 
   no_matches_list %>% 
-  pbapply::pblapply(function(x) {
-    x %>% 
-      strr_as_sf(3857) %>% 
-      st_intersection(country_2_buffer_sub)
-  }, cl = 6) %>% 
-  map(~{
+  furrr::future_map_dfr(~{
     .x %>% 
+      strr_as_sf(3857) %>% 
+      st_intersection(country_2_buffer_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  }) %>% bind_rows()
+  })
 
 
 ## Decide ties based on closest distance
@@ -298,7 +284,7 @@ if (nrow(ties_2) != 0) {
       ties_2 %>% 
         summarize(candidates = list(name)) %>% 
         split(1:100) %>% 
-        pbapply::pblapply(function(x) {
+        furrr::future_map(function(x) {
           x %>% 
             mutate(winner = map2_chr(property_ID, candidates, ~{
               index <- 
@@ -307,7 +293,7 @@ if (nrow(ties_2) != 0) {
                 strr_as_sf(3857) %>% 
                 st_nearest_feature(countries_2 %>% filter(name %in% unlist(.y)))
               (countries_2 %>% filter(name %in% unlist(.y)))[index,]$name
-            }))}, cl = 6)
+            }))})
     )
     
   country_matches_5 <- 
@@ -337,7 +323,7 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-save(country_matches_5, ties, no_matches, file = "temp_8.Rdata")
+future(save(country_matches_5, ties, no_matches, file = "temp_8.Rdata"))
 
 suppressWarnings(
   rm(no_matches_list, ties_list, ties_2, countries, countries_2,
@@ -367,7 +353,7 @@ country_matches <-
 
 ### Save temporary output ######################################################
 
-save(country_matches, file = "temp_9.Rdata")
+future(save(country_matches, file = "temp_9.Rdata"))
 
 rm(country_matches_1, country_matches_2, country_matches_3, country_matches_4,
    country_matches_5, no_matches)
@@ -497,7 +483,7 @@ property <-
 
 ### Save temporary output ######################################################
 
-save(property, location_table, file = "temp_10.Rdata")
+future(save(property, location_table, file = "temp_10.Rdata"))
 
 rm(country_2_buffer_sub, country_buffer_sub, country_comparison, country_fixed,
    country_matches, country_no_agree, country_no_agree_valid, 
@@ -658,7 +644,7 @@ property <-
 
 ### Save temporary output ######################################################
 
-save(property, file = "temp_11.Rdata")
+future(save(property, file = "temp_11.Rdata"))
 
 rm(Canada_agree, Canada_comparison, Canada_finished, Canada_no_agree,
    Canada_no_agree_valid, provinces, Canada_provinces, province_names)
@@ -707,12 +693,12 @@ US_states <-
   
 US_states <-
   US_states %>% 
-  pbapply::pblapply(function(x) {
+  furrr::future_map(function(x) {
     x %>% 
       strr_as_sf(3857) %>% 
       st_intersects(states) %>% 
       map_chr(~{if (length(.x) == 0) NA_character_ else states[.x,]$NAME})
-  }, cl = 6) %>% 
+  }) %>% 
   map2_df(US_states, ~{.y %>% mutate(NAME = .x)}) %>% 
   filter(!is.na(NAME))
 
@@ -726,12 +712,12 @@ US_nearest <-
   
 US_nearest <- 
   US_nearest %>% 
-  pbapply::pblapply(function(x) {
+  furrr::future_map(function(x) {
     x %>% 
       strr_as_sf(3857) %>% 
       st_nearest_feature(states) %>% 
       map_chr(~{states[.x,]$NAME})
-  }, cl = 6) %>% 
+  }) %>% 
   map2_df(US_nearest, ~{.y %>% mutate(NAME = .x)})
 
 US_states <- 
@@ -849,7 +835,7 @@ property <-
 
 ### Save temporary output ######################################################
 
-save(property, file = "temp_12.Rdata")
+future(save(property, file = "temp_12.Rdata"))
 
 rm(scrape_results, states, US_agree, US_comparison, US_finished, US_no_agree,
    US_no_agree_valid, US_states, state_names, US_nearest)
@@ -918,7 +904,7 @@ property <-
 
 ### Save temporary output ######################################################
 
-save(property, file = "temp_13.Rdata")
+future(save(property, file = "temp_13.Rdata"))
 
 rm(listings_to_check, listings_to_check_finished, regions_to_check,
    region_whitelist)
@@ -1026,7 +1012,7 @@ property <-
 
 ### Save temporary output ######################################################
 
-save(property, file = "temp_14.Rdata")
+future(save(property, file = "temp_14.Rdata"))
 
 rm(Germany_fix, Russia_fix, regions_with_many_countries, regions_many_property,
    winners, losers)
@@ -1059,7 +1045,7 @@ region_hulls_2 <-
            )$country_region) %>% 
   group_by(country, region) %>% 
   group_split() %>% 
-  pbapply::pblapply(function(x) {
+  furrr::future_map(function(x) {
     x %>% 
       strr_as_sf(3857) %>% 
       group_by(country, region) %>% 
@@ -1068,7 +1054,7 @@ region_hulls_2 <-
                                                   country == .$country, 
                                                   region == .$region))) %>% 
       st_convex_hull()
-  }, cl = 6)
+  })
 
 region_hulls_2 <- 
   region_hulls_2 %>%
@@ -1122,7 +1108,7 @@ country_groups <-
 
 region_intersects <- 
   country_groups %>% 
-  pbapply::pblapply(function(x) {
+  furrr::future_map(function(x) {
     
     country_hulls <- region_hulls %>% filter(country == x[1,]$country)
     
@@ -1135,7 +1121,7 @@ region_intersects <-
     map_chr(intersects, ~{
       if (length(.x) == 1) country_hulls[.x,]$region else NA_character_
     })
-  }, cl = 6) %>% 
+  }) %>% 
   map2_df(country_groups, ~{mutate(.y, region = .x)})
 
 
@@ -1149,9 +1135,9 @@ property <-
 
 ### Save updated region hulls and temporary output #############################
 
-save(region_hulls, file = "data/region_hulls.Rdata")
+future(save(region_hulls, file = "data/region_hulls.Rdata"))
 
-save(property, file = "temp_15.Rdata")
+future(save(property, file = "temp_15.Rdata"))
 
 suppressWarnings(
   rm(country_groups, region_hulls, region_hulls_2, region_intersects,
@@ -1193,10 +1179,11 @@ location_table <-
 
 ### Save output to disk and delete temporary files #############################
 
-save(property, file = paste0("output/property/property_", year_month, ".Rdata"))
+future(save(property, 
+            file = paste0("output/property/property_", year_month, ".Rdata")))
 
-save(location_table, 
-     file = paste0("output/property/location_table_", year_month, ".Rdata"))
+future(save(location_table, 
+     file = paste0("output/property/location_table_", year_month, ".Rdata")))
 
 file.remove("temp_1.Rdata", "temp_2.Rdata", "temp_3.Rdata", "temp_4.Rdata", 
             "temp_5.Rdata", "temp_6.Rdata", "temp_7.Rdata", "temp_8.Rdata",
