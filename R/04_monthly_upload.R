@@ -13,6 +13,9 @@ library(tidyverse)
 library(strr)
 library(upgo)
 library(RPostgres)
+library(future)
+
+plan(multiprocess)
 
 
 ### Declare date variables #####################################################
@@ -31,7 +34,7 @@ year_month <-
   )}
 
 # Manually specify year_month if needed
-# year_month <- "2019_11"
+# year_month <- "2020_03"
 
 # Derive last_month using same pattern matching
 last_month <- 
@@ -99,8 +102,8 @@ property_create <- 'CREATE TABLE public.property
     num_photos real,
     instant_book boolean,
     rating real,
-    ab_property real,
-    ab_host real,
+    ab_property text COLLATE pg_catalog."default",
+    ab_host text COLLATE pg_catalog."default",
     ha_property text COLLATE pg_catalog."default",
     ha_host text COLLATE pg_catalog."default",
     CONSTRAINT "property_pkey" PRIMARY KEY ("property_ID")
@@ -140,7 +143,16 @@ property_index_city <-
 
 ### Execute queries to remove old table and create new one #####################
 
-upgo_connect(property = FALSE, daily = FALSE, multi = FALSE, reviews = FALSE)
+upgo_connect(property = FALSE, daily = FALSE, host = FALSE, reviews = FALSE,
+             remote = TRUE)
+
+dbExecute(.con, property_drop)
+dbExecute(.con, property_create)
+dbExecute(.con, property_perm_dw)
+dbExecute(.con, property_index_host_ID)
+dbExecute(.con, property_index_country)
+dbExecute(.con, property_index_region)
+dbExecute(.con, property_index_city)
 
 dbExecute(con, property_drop)
 dbExecute(con, property_create)
@@ -159,6 +171,8 @@ rm(property_drop, property_create, property_perm_dw, property_perm_ro,
 ### Upload table ###############################################################
 
 Sys.time()
+RPostgres::dbWriteTable(.con, "property", property, append = TRUE)
+Sys.time()
 RPostgres::dbWriteTable(con, "property", property, append = TRUE)
 Sys.time()
 
@@ -169,67 +183,56 @@ Sys.time()
 
 
 ################################################################################
-#### 3. PREPARE DAILY FILE 1 ###################################################
+#### 3. PREPARE DAILY FILE #####################################################
 
 ### Import daily file ##########################################################
 
-load("data/daily_length.Rdata")
-
-daily <- read_csv(paste0("data/daily_", year_month, ".gz"), 
-                  col_names = c("Property ID", "Date", "Status", "Booked Date",
-                                "Price (USD)", "Price (Native)",
-                                "Currency Native", "Reservation ID", 
-                                "Airbnb Property ID", "HomeAway Property ID"),
-                  col_types = "cDcDddcddc", skip = 1, 
-                  n_max = floor(daily_length / 3)) %>% 
+daily <- 
+  read_csv(paste0("data/daily_", year_month, ".gz"),
+           col_types = "cDcDddcddc") %>% 
   select(`Property ID`, Date, Status, `Booked Date`, `Price (USD)`,
          `Reservation ID`)
 
 
-### Prepare ML table ###########################################################
+### Produce daily and host files ###############################################
 
-# ML_1 <- 
-#   daily %>% 
-#   set_names("property_ID", "date", "status", "booked_date", "price", 
-#             "res_ID") %>% 
-#   left_join(select(property, property_ID, host_ID, listing_type)) %>% 
-#   count(host_ID, date, listing_type)
-# 
-# save(ML_1, file = "temp_ML_1.Rdata")
-# 
-# rm(ML_1)
-
-
-### Compress daily file, join to property file, and save output ################
-
-output_1 <- strr_compress(daily, cores = 5)
+output <- 
+  daily %>% 
+  strr_process_daily(property)
 
 daily <- 
-  output_1[[1]] %>% 
-  inner_join(select(property, property_ID, host_ID, listing_type:housing,
-                   country:city),
-            by = "property_ID")
+  output[[1]] %>% 
+  strr_compress()
+
+daily_inactive <- 
+  output[[2]] %>% 
+  strr_compress()
+
+host <- 
+  output[[1]] %>% 
+  strr_host() %>% 
+  strr_compress()
+
+host_inactive <- 
+  output[[2]] %>% 
+  strr_host() %>% 
+  strr_compress()
 
 save(daily, file = paste0("output/", substr(year_month, 1, 4), 
-                          "/daily_", year_month, "_1.Rdata"))
-write_csv(output_1[[2]], paste0("output/", substr(year_month, 1, 4), "/error_", 
-                                year_month, "_1.csv")) 
-write_csv(output_1[[3]], paste0("output/", substr(year_month, 1, 4), 
-                                "/missing_rows_", year_month, "_1.csv"))
+                          "/daily_", year_month, ".Rdata"))
+save(daily_inactive, file = paste0("output/", substr(year_month, 1, 4), 
+                          "/daily_inactive_", year_month, ".Rdata"))
+save(host, file = paste0("output/", substr(year_month, 1, 4), 
+                          "/host_", year_month, ".Rdata"))
+save(host_inactive, file = paste0("output/", substr(year_month, 1, 4), 
+                         "/host_inactive_", year_month, ".Rdata"))
 
+write_csv(output[[3]], paste0("output/", substr(year_month, 1, 4), "/error_", 
+                                year_month, ".csv")) 
+write_csv(output[[4]], paste0("output/", substr(year_month, 1, 4), 
+                                "/missing_rows_", year_month, ".csv"))
 
-### Add to no_property_ID file #################################################
-
-load(paste0("output/2019/no_PID_", last_month, ".Rdata"))
-
-no_property_ID <- 
-  daily %>% 
-  filter(!(property_ID %in% property$property_ID)) %>% 
-  rbind(no_property_ID)
-
-save(no_property_ID, file = "temp_no_PID.Rdata")
-
-rm(output_1)
+rm(output)
 
 
 ################################################################################
@@ -238,279 +241,125 @@ rm(output_1)
 
 
 ################################################################################
-#### 4. PREPARE DAILY FILE 2 ###################################################
+#### 4. UPLOAD DAILY FILE ######################################################
 
-### Import daily file ##########################################################
+### Upload daily ###############################################################
 
-load("data/daily_length.Rdata")
-
-daily <- read_csv(paste0("data/daily_", year_month, ".gz"), 
-                  col_names = c("Property ID", "Date", "Status", "Booked Date",
-                                "Price (USD)", "Price (Native)",
-                                "Currency Native", "Reservation ID", 
-                                "Airbnb Property ID", "HomeAway Property ID"),
-                  col_types = "cDcDddcddc", 
-                  skip = 1 + floor(daily_length / 3),
-                  n_max = floor(daily_length / 3)) %>% 
-  select(`Property ID`, Date, Status, `Booked Date`, `Price (USD)`,
-         `Reservation ID`)
-
-
-### Prepare ML table ###########################################################
-
-# ML_2 <- 
-#   daily %>% 
-#   set_names("property_ID", "date", "status", "booked_date", "price", 
-#             "res_ID") %>% 
-#   left_join(select(property, property_ID, host_ID, listing_type)) %>% 
-#   count(host_ID, date, listing_type)
-# 
-# save(ML_2, file = "temp_ML_2.Rdata")
-# 
-# rm(ML_2)
-
-
-### Compress daily file, join to property file, and save output ################
-
-output_2 <- strr_compress(daily, cores = 5)
-
-daily <- 
-  output_2[[1]] %>% 
-  inner_join(select(property, property_ID, host_ID, listing_type:housing,
-                   country:city),
-            by = "property_ID")
-
-save(daily, file = paste0("output/", substr(year_month, 1, 4), 
-                          "/daily_", year_month, "_2.Rdata"))
-write_csv(output_2[[2]], paste0("output/", substr(year_month, 1, 4), "/error_", 
-                                year_month, "_2.csv")) 
-write_csv(output_2[[3]], paste0("output/", substr(year_month, 1, 4), 
-                                "/missing_rows_", year_month, "_2.csv"))
-
-
-### Add to no_property_ID file #################################################
-
-load("temp_no_PID.Rdata")
-
-no_property_ID <- 
-  daily %>% 
-  filter(!(property_ID %in% property$property_ID)) %>% 
-  rbind(no_property_ID)
-
-save(no_property_ID, file = "temp_no_PID.Rdata")
-
-rm(output_2)
-
-
-################################################################################
-################################################################################
-
-
-
-################################################################################
-#### 5. PREPARE DAILY FILE 3 ###################################################
-
-### Import daily file ##########################################################
-
-load("data/daily_length.Rdata")
-
-daily <- read_csv(paste0("data/daily_", year_month, ".gz"), 
-                  col_names = c("Property ID", "Date", "Status", "Booked Date",
-                                "Price (USD)", "Price (Native)",
-                                "Currency Native", "Reservation ID", 
-                                "Airbnb Property ID", "HomeAway Property ID"),
-                  col_types = "cDcDddcddc", 
-                  skip = 1 + 2 * floor(daily_length / 3)) %>% 
-  select(`Property ID`, Date, Status, `Booked Date`, `Price (USD)`,
-         `Reservation ID`)
-
-
-### Prepare ML table ###########################################################
-
-# ML_3 <- 
-#   daily %>% 
-#   set_names("property_ID", "date", "status", "booked_date", "price", 
-#             "res_ID") %>% 
-#   left_join(select(property, property_ID, host_ID, listing_type)) %>% 
-#   count(host_ID, date, listing_type)
-# 
-# save(ML_3, file = "temp_ML_3.Rdata")
-# 
-# rm(ML_3)
-
-
-### Compress daily file, join to property file, and save output ################
-
-output_3 <- strr_compress(daily, cores = 4)
-
-daily <- 
-  output_3[[1]] %>% 
-  inner_join(select(property, property_ID, host_ID, listing_type:housing,
-                   country:city),
-            by = "property_ID")
-
-save(daily, file = paste0("output/", substr(year_month, 1, 4), 
-                          "/daily_", year_month, "_3.Rdata"))
-write_csv(output_3[[2]], paste0("output/", substr(year_month, 1, 4), "/error_", 
-                                year_month, "_3.csv")) 
-write_csv(output_3[[3]], paste0("output/", substr(year_month, 1, 4), 
-                                "/missing_rows_", year_month, "_3.csv"))
-
-
-### Add to no_property_ID file and export file #################################
-
-no_property_ID <- 
-  daily %>% 
-  filter(!(property_ID %in% property$property_ID)) %>% 
-  rbind(no_property_ID)
-
-save(no_property_ID, file = paste0("output/", substr(year_month, 1, 4), 
-                                   "/no_PID_", year_month, ".Rdata"))
-
-file.remove("temp_no_PID.Rdata", "data/daily_length.Rdata")
-
-rm(output_3, no_property_ID, daily, daily_length)
-
-
-################################################################################
-################################################################################
-
-
-
-################################################################################
-#### 6. UPLOAD DAILY FILES #####################################################
-
-### Upload file 1 ##############################################################
-
-load(paste0("output/", substr(year_month, 1, 4), "/daily_", year_month,
-            "_1.Rdata"))
-
-upgo_connect(property = FALSE, multi = FALSE, reviews = FALSE)
+upgo_connect(property = FALSE, daily = FALSE, host = FALSE, reviews = FALSE,
+             remote = TRUE)
 
 Sys.time()
 daily %>% 
-  filter(property_ID %in% property$property_ID) %>% 
+  RPostgres::dbWriteTable(.con, "daily", ., append = TRUE)
+Sys.time()
+daily %>% 
   RPostgres::dbWriteTable(con, "daily", ., append = TRUE)
 Sys.time()
 
-daily_all %>% 
+daily_local <- dplyr::tbl(.con, "daily")
+daily_remote <- dplyr::tbl(con, "daily")
+
+daily_local %>% 
   filter(property_ID == !! daily[1,]$property_ID,
          start_date == !! daily[1,]$start_date) %>% 
   collect() %>% 
   nrow()
 
-
-### Upload file 2 ##############################################################
-
-load(paste0("output/", substr(year_month, 1, 4), "/daily_", year_month,
-            "_2.Rdata"))
-
-upgo_connect(property = FALSE, multi = FALSE, reviews = FALSE)
-
-Sys.time()
-daily %>% 
-  filter(property_ID %in% property$property_ID) %>% 
-  RPostgres::dbWriteTable(con, "daily", ., append = TRUE)
-Sys.time()
-
-daily_all %>% 
+daily_remote %>% 
   filter(property_ID == !! daily[1,]$property_ID,
          start_date == !! daily[1,]$start_date) %>% 
   collect() %>% 
   nrow()
 
+rm(daily_local, daily_remote)
 
-### Upload file 3 ##############################################################
 
-load(paste0("output/", substr(year_month, 1, 4), "/daily_", year_month,
-            "_3.Rdata"))
+### Upload daily_inactive ######################################################
 
-upgo_connect(property = FALSE, multi = FALSE, reviews = FALSE)
+upgo_connect(property = FALSE, daily = FALSE, host = FALSE, reviews = FALSE,
+             remote = TRUE)
 
 Sys.time()
-daily %>% 
-  filter(property_ID %in% property$property_ID) %>% 
-  RPostgres::dbWriteTable(con, "daily", ., append = TRUE)
+daily_inactive %>% 
+  RPostgres::dbWriteTable(.con, "daily_inactive", ., append = TRUE)
+Sys.time()
+daily_inactive %>% 
+  RPostgres::dbWriteTable(con, "daily_inactive", ., append = TRUE)
 Sys.time()
 
-daily_all %>% 
-  filter(property_ID == !! daily[1,]$property_ID,
-         start_date == !! daily[1,]$start_date) %>% 
+daily_inactive_local <- dplyr::tbl(.con, "daily_inactive")
+daily_inactive_remote <- dplyr::tbl(con, "daily_inactive")
+
+daily_inactive_local %>% 
+  filter(property_ID == !! daily_inactive[1,]$property_ID,
+         start_date == !! daily_inactive[1,]$start_date) %>% 
   collect() %>% 
   nrow()
 
-upgo_disconnect()
+daily_inactive_remote %>% 
+  filter(property_ID == !! daily_inactive[1,]$property_ID,
+         start_date == !! daily_inactive[1,]$start_date) %>% 
+  collect() %>% 
+  nrow()
+
+rm(daily_inactive_local, daily_inactive_remote)
 
 
-################################################################################
-################################################################################
+### Upload host ################################################################
 
-
-
-################################################################################
-#### 7. PREPARE AND UPLOAD ML TABLE ############################################
-
-### Load files #################################################################
-
-load("temp_ML_1.Rdata")
-load("temp_ML_2.Rdata")
-load("temp_ML_3.Rdata")
-
-### Bind and compress the three separate tables ################################
-
-ML <- 
-  bind_rows(ungroup(ML_1), ungroup(ML_2), ungroup(ML_3)) %>% 
-  group_by(host_ID, date, listing_type) %>% 
-  summarize(count = sum(n)) %>% 
-  ungroup()
-
-rm(ML_1, ML_2, ML_3)
-
-ML <- 
-  ML %>% 
-  ungroup() %>% 
-  strr_compress(cores = 6)
-
-
-### Save final ML table to disk ################################################
-
-save(ML, file = paste0("output/ML/ML_", year_month, ".Rdata"))
-
-file.remove("temp_ML_1.Rdata")
-file.remove("temp_ML_2.Rdata")
-file.remove("temp_ML_3.Rdata")
-
-
-### Produce updated no_ML file #################################################
-
-load(paste0("output/ML/no_ML_", last_month, ".Rdata"))
-
-no_ML <- 
-  ML %>% 
-  filter(!(host_ID %in% property$host_ID)) %>% 
-  rbind(no_ML)
-
-save(no_ML, file = paste0("output/ML/no_ML_", year_month, ".Rdata"))
-
-rm(no_ML)
-
-
-### Upload ML table ############################################################
-
-upgo_connect(property = FALSE, daily = FALSE, ML = FALSE)
+upgo_connect(property = FALSE, daily = FALSE, host = FALSE, reviews = FALSE,
+             remote = TRUE)
 
 Sys.time()
-ML %>% 
+host %>% 
   filter(host_ID %in% property$host_ID) %>% 
-  RPostgres::dbWriteTable(con, "ML", ., append = TRUE)
+  RPostgres::dbWriteTable(.con, "host", ., append = TRUE)
+Sys.time()
+host %>% 
+  filter(host_ID %in% property$host_ID) %>% 
+  RPostgres::dbWriteTable(con, "host", ., append = TRUE)
 Sys.time()
 
+host_local <- dplyr::tbl(.con, "host")
+host_remote <- dplyr::tbl(con, "host")
+
+host_local %>% 
+  filter(host_ID == !! host[1,]$host_ID,
+         start_date == !! host[1,]$start_date) %>% 
+  collect() %>% 
+  nrow()
+
+host_remote %>% 
+  filter(host_ID == !! host[1,]$host_ID,
+         start_date == !! host[1,]$start_date) %>% 
+  collect() %>% 
+  nrow()
+
+rm(host_local, host_remote)
+
+
+### Upload host_inactive #######################################################
+
+upgo_connect(property = FALSE, daily = FALSE, host = FALSE, reviews = FALSE,
+             remote = TRUE)
+
+Sys.time()
+host_inactive %>% 
+  filter(host_ID %in% property$host_ID) %>% 
+  RPostgres::dbWriteTable(con, "host_inactive", ., append = TRUE)
+Sys.time()
+
+host_inactive_remote <- dplyr::tbl(con, "host_inactive")
+
+host_inactive_remote %>% 
+  filter(host_ID == !! host_inactive[1,]$host_ID,
+         start_date == !! host_inactive[1,]$start_date) %>% 
+  collect() %>% 
+  nrow()
+
+rm(host_inactive_remote)
 
 upgo_disconnect()
-
-
-
-
 
 
 ################################################################################

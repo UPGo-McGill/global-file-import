@@ -9,11 +9,13 @@
 
 library(tidyverse)
 library(sf)
-library(strr)
 library(upgo)
+library(strr)
 library(future)
+library(furrr)
 
 plan(multiprocess)
+options(future.globals.maxSize = Inf)
 
 load("temp_3.Rdata")
 
@@ -21,8 +23,8 @@ load("temp_3.Rdata")
 year_month <- 
   paste0(substr(Sys.Date(), 1, 4), "_", substr(Sys.Date(), 6, 7)) %>% 
   {case_when(
-    substr(., 6, 7) == "01" ~ paste0(substr(., 1, 3),
-                                     as.numeric(substr(., 4, 4)) - 1, 
+    substr(., 6, 7) == "01" ~ paste0(substr(., 1, 2),
+                                     as.numeric(substr(., 3, 4)) - 1, 
                                      "_12"),
     substr(., 6, 7) == "10" ~ paste0(substr(., 1, 5), "09"),
     substr(., 6, 6) == "1"  ~ paste0(substr(., 1, 5), 
@@ -31,14 +33,14 @@ year_month <-
   )}
 
 # Manually specify year_month if needed
-#year_month <- "2019_11"
+# year_month <- "2020_03"
 
 # Derive last_month using same pattern matching
 last_month <- 
   year_month %>% 
   {case_when(
-    substr(., 6, 7) == "01" ~ paste0(substr(., 1, 3),
-                                     as.numeric(substr(., 4, 4)) - 1, 
+    substr(., 6, 7) == "01" ~ paste0(substr(., 1, 2),
+                                     as.numeric(substr(., 3, 4)) - 1, 
                                      "_12"),
     substr(., 6, 7) == "10" ~ paste0(substr(., 1, 5), "09"),
     substr(., 6, 6) == "1"  ~ paste0(substr(., 1, 5), 
@@ -77,8 +79,9 @@ countries_active <-
 country_list <- 
   countries_active %>% 
   group_split(name) %>% 
-  map(~{
+  future_map(~{
     .x %>% 
+      st_make_valid() %>% 
       lwgeom::st_subdivide(100) %>% 
       st_collection_extract("POLYGON") %>% 
       st_set_agr("identity")
@@ -88,7 +91,7 @@ country_list <-
 ## Create paired list of listings and polygons for each country
 
 pair_list <- 
-  map2({property %>% filter(!is.na(country)) %>% group_split(country)}, 
+  future_map2({property %>% filter(!is.na(country)) %>% group_split(country)}, 
        country_list, 
        list)
 
@@ -100,13 +103,13 @@ pair_list <-
 
 country_matches_1 <-
   pair_list %>% 
-  furrr::future_map_dfr(~{
+  future_map_dfr(~{
     .x[[1]] %>% 
       strr_as_sf(3857) %>% 
       st_intersection(.x[[2]]) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city)
-      }) %>% 
+      }, .progress = TRUE) %>% 
   distinct(property_ID, .keep_all = TRUE)
 
 no_matches <- 
@@ -116,7 +119,11 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-future(save(country_matches_1, no_matches, file = "temp_4.Rdata"))
+temp_4_flag %<-% {
+  save(country_matches_1, no_matches, file = "temp_4.Rdata")
+  TRUE
+}
+
 rm(countries_active, country_list, pair_list)
 
 
@@ -138,13 +145,13 @@ no_matches_list <-
 
 country_matches_2 <- 
   no_matches_list %>% 
-  furrr::future_map_dfr(~{
+  future_map_dfr(~{
     .x %>% 
       strr_as_sf(3857) %>% 
       st_intersection(countries_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-    })
+    }, .progress = TRUE)
 
 no_matches <- 
   no_matches %>% 
@@ -153,7 +160,10 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-future(save(country_matches_2, no_matches, file = "temp_5.Rdata"))
+temp_5_flag %<-% {
+  save(country_matches_2, no_matches, file = "temp_5.Rdata")
+  TRUE
+}
 
 
 ### Third try, against GADM 5 km borders #######################################
@@ -166,13 +176,13 @@ no_matches_list <-
 
 country_matches_3 <- 
   no_matches_list %>% 
-  furrr::future_map_dfr(~{
+  future_map_dfr(~{
     .x %>% 
       strr_as_sf(3857) %>% 
       st_intersection(country_buffer_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  })
+  }, .progress = TRUE)
 
 
 ## Decide ties based on closest distance
@@ -187,7 +197,7 @@ ties_list <-
     ties %>% 
       summarize(candidates = list(name)) %>% 
       split(1:100) %>% 
-      furrr::future_map(function(x) {
+      future_map(function(x) {
         x %>% 
           mutate(winner = map2_chr(property_ID, candidates, ~{
             index <- 
@@ -206,7 +216,7 @@ country_matches_3 <-
   group_by(property_ID, country, region, city) %>% 
   summarize() %>% 
   ungroup() %>% 
-  left_join(bind_rows(ties_list)) %>% 
+  left_join(bind_rows(ties_list), by = "property_ID") %>% 
   select(-candidates) %>% 
   rename(name = winner) %>% 
   rbind(country_matches_3 %>% group_by(property_ID) %>% filter(n() == 1) 
@@ -219,7 +229,10 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-future(save(country_matches_3, no_matches, ties, file = "temp_6.Rdata"))
+temp_6_flag %<-% {
+  save(country_matches_3, no_matches, ties, file = "temp_6.Rdata")
+  TRUE
+}
 
 rm(ties_list, no_matches_list)
 
@@ -234,13 +247,13 @@ no_matches_list <-
   
 country_matches_4 <- 
   no_matches_list %>% 
-  furrr::future_map_dfr(~{
+  future_map_dfr(~{
     .x %>% 
       strr_as_sf(3857) %>% 
       st_intersection(countries_2_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  })
+  }, .progress = TRUE)
 
 no_matches <- 
   no_matches %>% 
@@ -249,7 +262,10 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-future(save(country_matches_4, no_matches, file = "temp_7.Rdata"))
+temp_7_flag %<-% {
+  save(country_matches_4, no_matches, file = "temp_7.Rdata")
+  TRUE
+}
 
 
 ### Final try, with 5 km buffers around rnaturalearth boundary files ###########
@@ -262,13 +278,13 @@ no_matches_list <-
   
 country_matches_5 <- 
   no_matches_list %>% 
-  furrr::future_map_dfr(~{
+  future_map_dfr(~{
     .x %>% 
       strr_as_sf(3857) %>% 
       st_intersection(country_2_buffer_sub) %>% 
       st_drop_geometry() %>% 
       select(property_ID, country, region, city, name)
-  })
+  }, .progress = TRUE)
 
 
 ## Decide ties based on closest distance
@@ -323,7 +339,10 @@ no_matches <-
 
 ### Save temporary output ######################################################
 
-future(save(country_matches_5, ties, no_matches, file = "temp_8.Rdata"))
+temp_8_flag %<-% {
+  save(country_matches_5, ties, no_matches, file = "temp_8.Rdata")
+  TRUE
+}
 
 suppressWarnings(
   rm(no_matches_list, ties_list, ties_2, countries, countries_2,
@@ -353,7 +372,10 @@ country_matches <-
 
 ### Save temporary output ######################################################
 
-future(save(country_matches, file = "temp_9.Rdata"))
+temp_9_flag %<-% {
+  save(country_matches, file = "temp_9.Rdata")
+  TRUE
+}
 
 rm(country_matches_1, country_matches_2, country_matches_3, country_matches_4,
    country_matches_5, no_matches)
@@ -394,7 +416,11 @@ country_comparison <-
                              country_geo, country_scrape),
     country_scrape = if_else(country_scrape == "China" & 
                                country_geo == "Taiwan" &
-                               region == "Fujian", country_geo, country_scrape))
+                               region == "Fujian", country_geo, country_scrape),
+    country_scrape = if_else(
+      country_scrape == "Bonaire Sint Eustatius and Saba",
+      "Bonaire, Sint Eustatius and Saba", country_scrape)
+    )
 
 
 ## Find listings with scrapes which disagree with geolocation
@@ -483,11 +509,15 @@ property <-
 
 ### Save temporary output ######################################################
 
-future(save(property, location_table, file = "temp_10.Rdata"))
+temp_10_flag %<-% {
+  save(property, file = "temp_10.Rdata")
+  TRUE
+}
 
 rm(country_2_buffer_sub, country_buffer_sub, country_comparison, country_fixed,
    country_matches, country_no_agree, country_no_agree_valid, 
-   country_no_agree_valid_2, location_table)
+   country_no_agree_valid_2, location_table, temp_4_flag, temp_5_flag,
+   temp_6_flag, temp_7_flag, temp_8_flag, temp_9_flag)
 
 
 ################################################################################
@@ -524,7 +554,7 @@ Canada_provinces <-
   filter(country == "Canada") %>% 
   strr_as_sf(3857) %>% 
   st_nearest_feature(provinces) %>% 
-  map_chr(~{provinces[.x,]$name})
+  future_map_chr(~{provinces[.x,]$name})
 
 
 ## Create comparison table with AirDNA regions, geolocation and scraping
@@ -538,7 +568,8 @@ Canada_comparison <-
                    city_scrape = city), by = "property_ID") %>% 
   mutate(region_scrape = case_when(
     region_scrape %in% c("Ab", "AL", "alberta", "ALberta", "Alberta, Canada",
-                         "An") ~ 
+                         "An", "ALBERTA", "Calgary", "Edmonton",
+                         "Grande Prairie") ~ 
       "Alberta",
     
     region_scrape %in% c("B C", "B.C", "B.C.", "bc", "Bc", "BC Canada",
@@ -546,45 +577,55 @@ Canada_comparison <-
                          "BC/Canada", "British Colombia", "British Coloumbia", 
                          "British Columbia", "British Columbia ", 
                          "British Columbia (BC)", "British Columbia,",
+                         "Burnaby", "Chilliwack",
                          "Colombie-Britannique", "Colombie Britannique", 
-                         " Invermere", "Squamish BC") ~ 
+                         "Kamloops", "Kelowna",
+                         " Invermere", "Invermere", "Squamish BC", "Vancouver",
+                         "Surrey", "North Vancouver") ~ 
       "British Columbia",
     
-    region_scrape %in% c("Manitona", "Mb", "Maniitoba") ~
+    region_scrape %in% c("Manitona", "Mb", "Maniitoba", "manitoba", "Winnipeg",
+                         "WInnipeg") ~
       "Manitoba",
     
-    region_scrape %in% c("Nouveau-Brunswick") ~ 
+    region_scrape %in% c("Nouveau-Brunswick", "NEW BRUNSWICK", "New brunswick",
+                         "New-Brunswick") ~ 
       "New Brunswick",
     
-    region_scrape %in% c("Newfoundland", "Nl") ~ 
+    region_scrape %in% c("Newfoundland", "Newfound Land", "Nl", 
+                         "Newfoundland ") ~
       "Newfoundland and Labrador",
     
-    region_scrape %in% c("Cape Breton", "Cape Breton    NS", "Lunenburg, NS", 
-                         "Nouvelle-Écosse", "Nova scotia", "Nova Scotia", "Ns", 
-                         "NS- 316", "NS,") ~ 
+    region_scrape %in% c("Cape Breton", "Cape Breton    NS", "Halifax", 
+                         "Lunenburg, NS", "Nouvelle-Écosse", "Nova scotia", 
+                         "Nova Scotia", "Ns", "NS- 316", "NS,") ~ 
       "Nova Scotia",
     
-    region_scrape %in% c("Cornwall", "Eganville", "En Ontario.", "on", "On", 
-                         "ON", "ON / Prince Edward County", "ON,", "ON, Canada", 
-                         "ont", "Ont", "ontario", "Ontario", "ONtario",
-                         "ONTARIO", "Ontario,", "ONTARIO,", "ontario, canada", 
-                         "Onterio", "Prince Edward County", 
-                         "Prince Edward County ON", "TORONTO") ~ 
+    region_scrape %in% c("Cornwall", "Dundas", "East Gwillimbury", "Eganville", 
+                         "En Ontario.", "Greater Sudbury", "Oakville", "on", 
+                         "On", "ON", "ON / Prince Edward County", " Ontario", 
+                         "ON,", "ON, Canada", "ont", "Ont", "ontario", 
+                         "Ontario", "ONtario", "ONTARIO", "Ontario,", 
+                         "ONTARIO,", "ONTario", "ontario, canada", "Onterio", 
+                         "Prince Edward County", "Prince Edward County ON", 
+                         "Toronto", "TORONTO", "Ottawa", "Sudbury", 
+                         "Thunder Bay") ~ 
       "Ontario",
     
     region_scrape %in% c("PEI") ~
       "Prince Edward Island",
     
-    region_scrape %in% c("Cantons-de-l'est", "charlevoix Québec", "Lachine",
-                         "LaSalle,  Quebec", "Montreal", "Montreal, Québec",
-                         "P.Québec", "PQ",
+    region_scrape %in% c("Cantons-de-l'est", "charlevoix Québec",  "Gatineau",
+                         "Lachine", "LaSalle,  Quebec", "Longueuil", "Montreal", 
+                         "Montreal, Québec", "Montréal", "P.Québec", "PQ",
                          "Quebec", " Québec ", "-Quebec", "qc", "Qc", "QC ", 
                          "QC,", "Qu", "QuÃ©bec", "Que", "quebec", "QUEBEC", 
                          "Quebéc", "québec", "Québec", "QuÈbec", "Québec ", 
-                         "Québec City", "Quebec, Canada", "Quecbec") ~ 
+                         "Québec City", "Quebec, Canada", "Quecbec",
+                         "Ville de Québec") ~ 
       "Québec", 
     
-    region_scrape %in% c("Sk", "Saskatchwan") ~
+    region_scrape %in% c("Sk", "Saskatchwan", "Saskatoon") ~
       "Saskatchewan",
     
     region_scrape %in% c("Yukon Territory", "Yukon Territories") ~ 
@@ -639,12 +680,15 @@ property <-
   select(-region, -city) %>% 
   inner_join(Canada_finished, by = "property_ID") %>% 
   select(property_ID:country, region, city, everything()) %>% 
-  rbind(property %>% filter(!property_ID %in% Canada_finished$property_ID))
+  bind_rows(property %>% filter(!property_ID %in% Canada_finished$property_ID))
 
 
 ### Save temporary output ######################################################
 
-future(save(property, file = "temp_11.Rdata"))
+temp_11_flag %<-% {
+  save(property, file = "temp_11.Rdata")
+  TRUE
+}
 
 rm(Canada_agree, Canada_comparison, Canada_finished, Canada_no_agree,
    Canada_no_agree_valid, provinces, Canada_provinces, province_names)
@@ -693,7 +737,7 @@ US_states <-
   
 US_states <-
   US_states %>% 
-  furrr::future_map(function(x) {
+  future_map(function(x) {
     x %>% 
       strr_as_sf(3857) %>% 
       st_intersects(states) %>% 
@@ -712,7 +756,7 @@ US_nearest <-
   
 US_nearest <- 
   US_nearest %>% 
-  furrr::future_map(function(x) {
+  future_map(function(x) {
     x %>% 
       strr_as_sf(3857) %>% 
       st_nearest_feature(states) %>% 
@@ -737,25 +781,29 @@ US_comparison <-
             by = "property_ID") %>% 
   mutate(region_scrape = case_when(
     region_scrape %in% c("Al") ~ "Alabama",
-    region_scrape %in% c("Ak") ~ "Alaska",
+    region_scrape %in% c("Ak", "Anchorage") ~ "Alaska",
     region_scrape %in% c("Ar") ~ "Arkansas",
-    region_scrape %in% c("AZ", "Az") ~ "Arizona",
-    region_scrape %in% c("Ca", "ca", "Beverly Hills", "California ") ~ 
+    region_scrape %in% c("AZ", "Az", "Phoenix") ~ "Arizona",
+    region_scrape %in% c("Ca", "ca", "Anaheim", "Beverly Hills", 
+                         "California ", "Los Angeles", "San Diego") ~ 
       "California",
-    region_scrape %in% c("Co", "co", "CO", "CO ") ~ "Colorado",
-    region_scrape %in% c("Fl", "fl") ~ "Florida",
-    region_scrape %in% c("Ga") ~ "Georgia",
-    region_scrape %in% c("Hi") ~ "Hawaii",
+    region_scrape %in% c("Co", "co", "CO", "CO ", "Boulder", "Denver",
+                         "Fort Collins") ~ "Colorado",
+    region_scrape %in% c("Fl", "fl", " Florida ", "Cape Canaveral", 
+                         "Cape Coral", "Cocoa Beach", "Davenport", "Miami",
+                         "Miami Beach", "Panama City Beach") ~ "Florida",
+    region_scrape %in% c("Ga", "Atlanta", "Savannah") ~ "Georgia",
+    region_scrape %in% c("Hi", "Hi ") ~ "Hawaii",
     region_scrape %in% c("Id") ~ "Idaho",
-    region_scrape %in% c("Il") ~ "Illinois",
+    region_scrape %in% c("Il", "Chicago") ~ "Illinois",
     region_scrape %in% c("In") ~ "Indiana",
     region_scrape %in% c("Ks") ~ "Kansas",
     region_scrape %in% c("Ky") ~ "Kentucky",
-    region_scrape %in% c("La") ~ "Louisiana",
+    region_scrape %in% c("La", "Baton Rouge", "New Orleans") ~ "Louisiana",
     region_scrape %in% c("Ma") ~ "Massachusetts",
-    region_scrape %in% c("Md") ~ "Maryland",
-    region_scrape %in% c("Me") ~ "Maine",
-    region_scrape %in% c("Allston, Ma") ~ "Massachusetts",
+    region_scrape %in% c("Md", "Baltimore") ~ "Maryland",
+    region_scrape %in% c("Me", "Bangor") ~ "Maine",
+    region_scrape %in% c("Allston, Ma", "Boston") ~ "Massachusetts",
     region_scrape %in% c("Mi") ~ "Michigan",
     region_scrape %in% c("Mn") ~ "Minnesota",
     region_scrape %in% c("Ms") ~ "Mississippi",
@@ -764,16 +812,19 @@ US_comparison <-
     region_scrape %in% c("Ne") ~ "Nebraska",
     region_scrape %in% c("Nv") ~ "Nevada",
     region_scrape %in% c("Nh", "NH") ~ "New Hampshire",
+    region_scrape %in% c("Nm") ~ "New Mexico",
     region_scrape %in% c("Nj") ~ "New Jersey",
-    region_scrape %in% c("Ny", "ny", "NY ") ~ "New York",
-    region_scrape %in% c("Oh") ~ "Ohio",
+    region_scrape %in% c("New york", "Ny", "ny", "NY ", "Bronx", "Bronx ",
+                         "Brooklyn", "Brooklyn ") ~ "New York",
+    region_scrape %in% c("Oh", "Cincinnati", "Cleveland") ~ "Ohio",
     region_scrape %in% c("Ok", "ok") ~ "Oklahoma",
     region_scrape %in% c("Or") ~ "Oregon",
     region_scrape %in% c("Pa") ~ "Pennsylvania",
     region_scrape %in% c("Ri") ~ "Rhode Island",
     region_scrape %in% c("Sc", "sc", "Beaufort County") ~ "South Carolina",
-    region_scrape %in% c("Tn", "tn") ~ "Tennessee",
-    region_scrape %in% c("Tx") ~ "Texas",
+    region_scrape %in% c("Tn", "tn", "Nashville") ~ "Tennessee",
+    region_scrape %in% c("Tx", "Arlington", "Austin", "Dallas", "Houston") ~ 
+      "Texas",
     region_scrape %in% c("Ut", "ut") ~ "Utah",
     region_scrape %in% c("Va") ~ "Virginia",
     region_scrape %in% c("Vt") ~ "Vermont",
@@ -830,12 +881,15 @@ property <-
   select(-region, -city) %>% 
   inner_join(US_finished, by = "property_ID") %>% 
   select(property_ID:country, region, city, everything()) %>% 
-  rbind(property %>% filter(!property_ID %in% US_finished$property_ID))
+  bind_rows(property %>% filter(!property_ID %in% US_finished$property_ID))
 
 
 ### Save temporary output ######################################################
 
-future(save(property, file = "temp_12.Rdata"))
+temp_12_flag %<-% {
+  save(property, file = "temp_12.Rdata")
+  TRUE
+}
 
 rm(scrape_results, states, US_agree, US_comparison, US_finished, US_no_agree,
    US_no_agree_valid, US_states, state_names, US_nearest)
@@ -853,13 +907,13 @@ rm(scrape_results, states, US_agree, US_comparison, US_finished, US_no_agree,
 
 region_whitelist <- 
   c("American Samoa", "Australia", "Belize", "Bolivia", "Brazil", "Canada", 
-    "China", "Curaçao", "Egypt", "El Salvador", "Fiji", "France", "Germany", 
-    "Ghana", "Guam", "Guatemala", "Honduras", "India", "Indonesia", "Italy",
-    "Japan", "Jordan", "Kosovo", "Malaysia", "Martinique", "Mauritius", 
+    "China", "Curaçao", "Egypt", "El Salvador", "Fiji", "France", "Georgia", 
+    "Germany", "Ghana", "Guam", "Guatemala", "Honduras", "India", "Indonesia", 
+    "Italy", "Japan", "Jordan", "Kosovo", "Malaysia", "Martinique", "Mauritius", 
     "Mexico", "Nepal", "New Zealand", "Nicaragua", "Northern Mariana Islands", 
     "Panama", "Philippines", "Portugal", "Puerto Rico", "Réunion", "Russia", 
     "Saint Barthélemy", "Saint Martin", "Senegal", "Sint Maarten", 
-    "South Africa", "Spain", "Tanzania", "U.S. Virgin Islands", 
+    "South Africa", "Spain", "Tanzania", "U.S. Virgin Islands", "Ukraine", 
     "United Kingdom", "United States", "Venezuela")
 
 regions_to_check <- 
@@ -898,13 +952,16 @@ property <-
                     "num_reviews", "num_photos", "instant_book", "rating", 
                     "ab_property", "ab_host", "ha_property", "ha_host")) %>% 
   select(property_ID:longitude, country, region, city, everything()) %>% 
-  rbind(property %>% 
-          filter(!property_ID %in% listings_to_check_finished$property_ID))
+  bind_rows(property %>% 
+              filter(!property_ID %in% listings_to_check_finished$property_ID))
 
 
 ### Save temporary output ######################################################
 
-future(save(property, file = "temp_13.Rdata"))
+temp_13_flag %<-% {
+  save(property, file = "temp_13.Rdata")
+  TRUE
+}
 
 rm(listings_to_check, listings_to_check_finished, regions_to_check,
    region_whitelist)
@@ -925,10 +982,12 @@ Germany_fix <-
   filter(country == "Germany", region == "Hamburg") %>% 
   mutate(region = "Hamburg (Landmasse)")
 
-property <-
-  property %>% 
-  filter(!property_ID %in% Germany_fix$property_ID) %>% 
-  rbind(Germany_fix)
+if (nrow(Germany_fix) > 0) {
+  property <-
+    property %>% 
+    filter(!property_ID %in% Germany_fix$property_ID) %>% 
+    rbind(Germany_fix)
+}
 
 
 ### Harmonize Russia region names ##############################################
@@ -959,7 +1018,7 @@ Russia_fix <-
 property <- 
   property %>% 
   filter(!property_ID %in% Russia_fix$property_ID) %>% 
-  rbind(Russia_fix)
+  bind_rows(Russia_fix)
 
 
 ### Find countries with both valid and invalid region entries ##################
@@ -1007,12 +1066,15 @@ regions_many_property <-
 property <-
   property %>% 
   filter(!property_ID %in% regions_many_property$property_ID) %>% 
-  rbind(regions_many_property)
+  bind_rows(regions_many_property)
 
 
 ### Save temporary output ######################################################
 
-future(save(property, file = "temp_14.Rdata"))
+temp_14_flag %<-% {
+  save(property, file = "temp_14.Rdata")
+  TRUE
+}
 
 rm(Germany_fix, Russia_fix, regions_with_many_countries, regions_many_property,
    winners, losers)
@@ -1045,7 +1107,7 @@ region_hulls_2 <-
            )$country_region) %>% 
   group_by(country, region) %>% 
   group_split() %>% 
-  furrr::future_map(function(x) {
+  future_map(function(x) {
     x %>% 
       strr_as_sf(3857) %>% 
       group_by(country, region) %>% 
@@ -1054,7 +1116,7 @@ region_hulls_2 <-
                                                   country == .$country, 
                                                   region == .$region))) %>% 
       st_convex_hull()
-  })
+  }, .progress = TRUE)
 
 region_hulls_2 <- 
   region_hulls_2 %>%
@@ -1108,7 +1170,7 @@ country_groups <-
 
 region_intersects <- 
   country_groups %>% 
-  furrr::future_map(function(x) {
+  future_map(function(x) {
     
     country_hulls <- region_hulls %>% filter(country == x[1,]$country)
     
@@ -1121,7 +1183,7 @@ region_intersects <-
     map_chr(intersects, ~{
       if (length(.x) == 1) country_hulls[.x,]$region else NA_character_
     })
-  }) %>% 
+  }, .progress = TRUE) %>% 
   map2_df(country_groups, ~{mutate(.y, region = .x)})
 
 
@@ -1135,13 +1197,17 @@ property <-
 
 ### Save updated region hulls and temporary output #############################
 
-future(save(region_hulls, file = "data/region_hulls.Rdata"))
+temp_15_flag %<-% {
+  save(property, file = "temp_15.Rdata")
+  TRUE
+}
 
-future(save(property, file = "temp_15.Rdata"))
+save(region_hulls, file = "data/region_hulls.Rdata")
 
 suppressWarnings(
   rm(country_groups, region_hulls, region_hulls_2, region_intersects,
-     hulls_to_add, new_hulls))
+     hulls_to_add, new_hulls, temp_10_flag, temp_11_flag, temp_12_flag,
+     temp_13_flag, temp_14_flag))
 
 
 
@@ -1179,18 +1245,23 @@ location_table <-
 
 ### Save output to disk and delete temporary files #############################
 
-future(save(property, 
-            file = paste0("output/property/property_", year_month, ".Rdata")))
+property_flag %<-% {
+  save(property, 
+       file = paste0("output/property/property_", year_month, ".Rdata"))
+  TRUE
+}
 
-future(save(location_table, 
-     file = paste0("output/property/location_table_", year_month, ".Rdata")))
+save(location_table, 
+     file = paste0("output/property/location_table_", year_month, ".Rdata"))
 
-file.remove("temp_1.Rdata", "temp_2.Rdata", "temp_3.Rdata", "temp_4.Rdata", 
-            "temp_5.Rdata", "temp_6.Rdata", "temp_7.Rdata", "temp_8.Rdata",
-            "temp_9.Rdata", "temp_10.Rdata", "temp_11.Rdata", "temp_12.Rdata",
-            "temp_13.Rdata", "temp_14.Rdata", "temp_15.Rdata")
+if (property_flag) {
+  file.remove("temp_1.Rdata", "temp_2.Rdata", "temp_3.Rdata", "temp_4.Rdata", 
+              "temp_5.Rdata", "temp_6.Rdata", "temp_7.Rdata", "temp_8.Rdata",
+              "temp_9.Rdata", "temp_10.Rdata", "temp_11.Rdata", "temp_12.Rdata",
+              "temp_13.Rdata", "temp_14.Rdata", "temp_15.Rdata")
+}
 
-rm(location_table, property_fixed)
+rm(location_table, property_fixed, property_flag, temp_15_flag)
 
 
 ################################################################################

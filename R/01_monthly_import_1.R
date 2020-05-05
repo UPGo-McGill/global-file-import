@@ -8,11 +8,12 @@
 #### 1. LOAD LIBRARIES AND PREPARE DATES #######################################
 
 library(tidyverse)
-library(strr)
 library(upgo)
+library(strr)
 library(future)
 
-plan(multisession, workers = 4)
+plan(multisession)
+options(future.globals.maxSize = Inf)
 
 # Detect year_month from current date
 year_month <- 
@@ -28,7 +29,7 @@ year_month <-
     )}
 
 # Manually specify year_month if needed
-# year_month <- "2019_11"
+# year_month <- "2020_01"
 
 # Derive last_month using same pattern matching
 last_month <- 
@@ -54,18 +55,32 @@ last_month <-
 
 ### Find dates for file names ##################################################
 
-property_dates <- 
+upgo_bucket <- paws::s3()
+
+dates <- 
+  c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", 
+    "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
+    "25", "26", "27", "28", "29", "30", "31")
+
+property_dates <-
   suppressMessages(
-    map_lgl(10:31, ~{
-      aws.s3::head_object(
-        bucket = "airdna-data/McGill",
-        region = "us-west-1",
-        check_region = FALSE,
-        object = paste0(
-          "All_Property_Match_",
-          substr(Sys.Date(), 1, 8),
-          .x,
-          ".zip"))[[1]]
+    map_lgl(dates, ~{
+      
+      date <- 
+        tryCatch({
+          upgo_bucket$head_object(
+            Bucket = "airdna-data",
+            Key = paste0(
+              "McGill/All_Property_Match_",
+              substr(Sys.Date(), 1, 8),
+              .x,
+              ".zip"))  
+        }, error = function(e) FALSE)
+      
+      if (length(date) > 1) date <- TRUE
+      
+      date
+      
     }))
 
 property_name <- 
@@ -73,22 +88,29 @@ property_name <-
     paste0(
       "All_Property_Match_",
       substr(Sys.Date(), 1, 8),
-      (10:31)[which(property_dates)],
+      dates[which(property_dates)],
       ".zip"
     )}
 
-daily_dates <- 
+daily_dates <-
   suppressMessages(
-    map_lgl(10:31, ~{
-      aws.s3::head_object(
-        bucket = "airdna-data/McGill",
-        region = "us-west-1",
-        check_region = FALSE,
-        object = paste0(
-          "All_1Month_Daily_Match_",
-          substr(Sys.Date(), 1, 8),
-          .x,
-          ".zip"))[[1]]
+    map_lgl(dates, ~{
+      
+      date <- 
+        tryCatch({
+          upgo_bucket$head_object(
+            Bucket = "airdna-data",
+            Key = paste0(
+              "McGill/All_1Month_Daily_Match_",
+              substr(Sys.Date(), 1, 8),
+              .x,
+              ".zip"))  
+        }, error = function(e) FALSE)
+      
+      if (length(date) > 1) date <- TRUE
+      
+      date
+      
     }))
 
 daily_name <-
@@ -96,7 +118,7 @@ daily_name <-
     paste0(
       "All_1Month_Daily_Match_",
       substr(Sys.Date(), 1, 8),
-      (10:31)[which(daily_dates)],
+      dates[which(daily_dates)],
       ".zip"
     )}
 
@@ -172,7 +194,8 @@ daily_flag %<-% {
 
 ### Clean up ###################################################################
 
-rm(property_dates, property_name, daily_dates, daily_name, i)
+rm(dates, property_dates, property_name, daily_dates, daily_name, i, 
+   upgo_bucket)
 
 
 ################################################################################
@@ -268,7 +291,7 @@ rm(output, prop_flag, daily_flag)
 
 ### Fill in missing created and scraped values from daily table on server ######
 
-upgo_connect()
+upgo_connect(property = FALSE, host = FALSE)
 
 property <- 
   daily_all %>% 
@@ -277,7 +300,7 @@ property <-
          start_date == min(start_date[status != "U"], na.rm = TRUE)) %>% 
   collect() %>% 
   select(property_ID, created2 = start_date) %>% 
-  left_join(property, .) %>% 
+  left_join(property, ., by = "property_ID") %>% 
   mutate(created = if_else(is.na(created), created2, created)) %>% 
   select(-created2)
 
@@ -288,18 +311,12 @@ property <-
          end_date == max(end_date[status != "U"], na.rm = TRUE)) %>% 
   collect() %>% 
   select(property_ID, scraped2 = end_date) %>% 
-  left_join(property, .) %>% 
+  left_join(property, ., by = "property_ID") %>% 
   mutate(scraped = if_else(is.na(scraped), scraped2, scraped)) %>% 
   select(-scraped2) %>% 
   filter(!is.na(scraped))
 
 upgo_disconnect()
-
-
-### Save daily_length for later ################################################
-
-daily_length <- nrow(daily) - 1
-save(daily_length, file = "data/daily_length.Rdata")
 
 
 ### Fill in missing created values from new daily file #########################
@@ -317,12 +334,12 @@ property <-
   mutate(created = if_else(is.na(created), created_new, created)) %>% 
   select(-created_new)
 
-rm(daily, daily_created, daily_length)
+rm(daily, daily_created)
 
 
 ### Save temporary copy of property file #######################################
 
-future(save(property, file = "temp_1.Rdata"))
+save(property, file = "temp_1.Rdata")
 
 
 ################################################################################
@@ -339,12 +356,12 @@ load("data/region_list.Rdata")
 
 new_regions <- 
   property %>% 
-  filter(!is.na(region, !region %in% region_list))
+  filter(!is.na(region), !region %in% region_list)
 
 region_list <- 
   sort(unique(c(region_list, unique(new_regions$region))))
 
-future(save(region_list, file = "data/region_list.Rdata"))
+save(region_list, file = "data/region_list.Rdata")
 
 
 ### Load location table and scrape results #####################################
@@ -368,14 +385,14 @@ property_fixed <-
   # Exclude listings with new scrapes
   filter(!property_ID %in% new_scrapes$property_ID) %>% 
   select(-country, -region, -city) %>% 
-  inner_join(location_table) %>% 
+  inner_join(location_table, by = c("property_ID", "latitude", "longitude")) %>% 
   select(property_ID:housing, latitude, longitude, country:city,
          everything())
 
 
 ### Save temporary output ######################################################
 
-future(save(property_fixed, file = "temp_2.Rdata"))
+save(property_fixed, file = "temp_2.Rdata")
 
 
 ### Pull out listings to be checked ############################################
@@ -387,7 +404,7 @@ property <-
 
 ### Save temporary output ######################################################
 
-future(save(property, file = "temp_3.Rdata"))
+save(property, file = "temp_3.Rdata")
 
 
 ### Find listings without scrapes in the last month ############################
@@ -415,10 +432,10 @@ scrape_pool_2 <-
 
 ### Save output and clean up ###################################################
 
-future(save(scrape_pool_1, scrape_pool_2, file = "data/scrape_pool.Rdata"))
+save(scrape_pool_1, scrape_pool_2, file = "data/scrape_pool.Rdata")
 
-rm(property_fixed, location_table, scrape_pool, scrape_pool_1, scrape_pool_2,
-   new_regions, region_list)
+rm(property, property_fixed, location_table, new_scrapes, scrape_pool, 
+   scrape_pool_1, scrape_pool_2, scrape_results, new_regions, region_list)
 
 
 ################################################################################
